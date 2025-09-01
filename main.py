@@ -1,35 +1,70 @@
+import os
 from dotenv import load_dotenv
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain import hub
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+
+from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-def main():
 
-    information= """
-    Elon Reeve Musk FRS (/ˈiːlɒn/ EE-lon; born June 28, 1971) is an international businessman and entrepreneur known for his leadership of Tesla, SpaceX, X (formerly Twitter), and the Department of Government Efficiency (DOGE). Musk has been the wealthiest person in the world since 2021; as of May 2025, Forbes estimates his net worth to be US$424.7 billion.
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
 
-    Born to a wealthy family in Pretoria, South Africa, Musk emigrated in 1989 to Canada; he had obtained Canadian citizenship at birth through his Canadian-born mother. He received bachelor's degrees in 1997 from the University of Pennsylvania in Philadelphia, United States, before moving to California to pursue business ventures. In 1995, Musk co-founded the software company Zip2. Following its sale in 1999, he co-founded X.com, an online payment company that later merged to form PayPal, which was acquired by eBay in 2002. That year, Musk also became an American citizen.
-    """
-
-    summary_template = """
-    given the information {information} about a person I want you to create:
-    1. A short summary
-    2. two interesting facts about them
-    """
-
-    summary_prompt_template = PromptTemplate(
-        input_variables=["information"],
-        template=summary_template
-    )
-
-    llm = ChatOpenAI(temperature=0, model="gpt-5")
-
-    chain = summary_prompt_template | llm  #LCEL 
-
-    response = chain.invoke(input={"information": information})
-
-    print(response.content)
 
 if __name__ == "__main__":
-    main()
+    print("Retriving...")
+
+    embeddings = OpenAIEmbeddings()
+    llm = ChatOpenAI(model="gpt-5")
+
+    query = "What is Pinecone in machine learning?"
+
+    chain = PromptTemplate.from_template(template=query) | llm
+    result = chain.invoke(input={})
+
+    print(result.content)
+
+    ## Augmentation using vector
+    vectorstore = PineconeVectorStore(
+        index_name=os.environ["INDEX_NAME"], embedding=embeddings
+    )
+
+    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+
+    combine_docs_chain = create_stuff_documents_chain(llm, retrieval_qa_chat_prompt)
+
+    retrival_chain = create_retrieval_chain(
+        retriever=vectorstore.as_retriever(), combine_docs_chain=combine_docs_chain
+    )
+
+    result = retrival_chain.invoke(input={"input": query})
+
+    print(result)
+
+    template = """Use the following pieces of context to answer the question at the end. If you don't know the answer, just say that you don't know, don't try to make up an answer. Use three sentences maximum and keep the answer as concise as possible.
+    Always say "thanks for asking!" at the end of the answer.
+
+    {context}
+
+    Question: {question}
+
+    Helpful Answer: """
+
+    custom_rag_prompt = PromptTemplate.from_template(template)
+
+    rag_chain = (
+        {
+            "context": vectorstore.as_retriever() | format_docs,
+            "question": RunnablePassthrough(),
+        }
+        | custom_rag_prompt
+        | llm
+    )
+
+    res = rag_chain.invoke(query)
+    print(res)
